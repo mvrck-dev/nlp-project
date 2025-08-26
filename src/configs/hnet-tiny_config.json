@@ -1,0 +1,17 @@
+{
+  "model_type": "hnet",
+  "stages": 1,
+  "d_model": 384,
+  "num_layers": 8,
+  "num_heads": 8,
+  "ffn_dim": 1536,
+  "vocab_size": 256,
+  "max_seq_len": 512,
+  "dropout": 0.1,
+  "chunking": {
+    "enabled": true,
+    "router_hidden": 64,
+    "target_reduction": 4.0
+  },
+  "tie_weights": false
+}
