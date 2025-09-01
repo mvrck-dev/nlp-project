@@ -3,7 +3,7 @@
 # Base image with CUDA, PyTorch, and Deepspeed support
 FROM nvcr.io/nvidia/pytorch:23.10-py3
 
-# Install unzip and clean up to reduce image size
+# Install unzip and git (still useful for pulling repos or debugging)
 RUN apt-get update && apt-get install -y unzip git && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install required Python packages
@@ -13,20 +13,14 @@ RUN pip install --upgrade pip \
 # Set working directory
 WORKDIR /workspace
 
-# Copy the zipped project
-COPY src.zip /workspace/
+# Copy the entire source directory directly from your GitHub repo
+COPY src/ /workspace/src/
 
-# Make unzip step rerunnable:
-#  - Remove any old extracted folder before unzipping
-#  - Remove any .git folders if they exist
-RUN rm -rf src \
-    && unzip -o src.zip \
-    && find src -name ".git" -type d -exec rm -rf {} + \
-    && rm -f src.zip
+# Remove any .git folders to keep image clean
+RUN find src -name ".git" -type d -exec rm -rf {} +
 
 # Ensure the entry script is executable
 RUN chmod +x /workspace/src/train_entry.sh
 
 # Default entrypoint: run the training script
 ENTRYPOINT ["/bin/bash", "/workspace/src/train_entry.sh"]
-
