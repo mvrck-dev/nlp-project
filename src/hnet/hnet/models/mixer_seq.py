@@ -39,12 +39,11 @@ class HNetForCausalLM(nn.Module, GenerationMixin):
         self.embeddings = nn.Embedding(vocab_size, d_embed, **factory_kwargs)
 
         self.backbone = HNet(
-            config=config,
-            # We pass in the stage_idx as an HNet needs to know what
-            # depth of the hierarchy it is in.
-            stage_idx=0,
-            **factory_kwargs,
-        )
+    config=config,
+    stage_idx=0,
+    **factory_kwargs,
+)
+
         self.lm_head = nn.Linear(d_embed, vocab_size, bias=False, **factory_kwargs)
         self.tie_weights()
 

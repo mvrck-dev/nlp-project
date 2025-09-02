@@ -16,6 +16,10 @@ from hnet.modules.utils import apply_optimization_params
 
 from .config_hnet import HNetConfig
 
+# --- GPT-NeoX ---
+from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
+# ------------------
+
 
 class STE(torch.autograd.Function):
     @staticmethod
@@ -38,6 +42,49 @@ class HNetState:
     main_network_state: Optional[Union["HNetState", IsotropicInferenceParams]] = None
     dechunk_state: Optional[DeChunkState] = None
     decoder_state: Optional[IsotropicInferenceParams] = None
+
+
+class GPTNeoXWrapper(nn.Module):
+    """
+    Wrapper for GPTNeoX model to make it compatible with the HNet's main_network interface.
+    The Isotropic module returns `(hidden_states, None)`.
+    The GPTNeoX model returns a CausalLMOutput object.
+    This wrapper ensures the output is a tuple `(logits, None)`.
+    """
+    def __init__(self, config: HNetConfig, stage_idx: int, d_model: int):
+        super().__init__()
+        # We need to derive GPT-NeoX config from HNet config
+        # This is a bit of a guess, might need tuning.
+        # We assume some conventions for mixer_kwargs in the isotropic config.
+        isotropic_config = config.layer_layout[stage_idx][0] # 'M' part of layout
+        num_heads = isotropic_config.get("mixer_kwargs", {}).get("num_heads", 16)
+        
+        # Find the MLP hidden size from the first layer's config
+        ffn_hidden_size = config.d_ff[stage_idx]
+
+        gptneox_cfg = GPTNeoXConfig(
+            vocab_size=config.vocab_size,
+            hidden_size=d_model,
+            num_attention_heads=num_heads,
+            num_hidden_layers=config.n_layers[stage_idx],
+            intermediate_size=ffn_hidden_size,
+            rotary_pct=1.0,  # A common setting for NeoX
+            tie_word_embeddings=False # We handle embeddings outside
+        )
+        self.model = GPTNeoXForCausalLM(gptneox_cfg)
+
+    def forward(self, hidden_states, cu_seqlens=None, max_seqlen=None, *args, **kwargs):
+        # The Isotropic module takes arguments we might not need (like cu_seqlens for flash attention).
+        # We only pass `inputs_embeds` to the GPT-NeoX model.
+        # The output needs to match the Isotropic module's output tuple format.
+        outputs = self.model(inputs_embeds=hidden_states)
+        # The backbone should not be projecting to vocab size, but returning hidden states.
+        # However, GPTNeoXForCausalLM's forward returns logits.
+        # This is a slight mismatch. The outer HNetForCausalLM will apply the final lm_head.
+        # Let's return the last hidden state instead of logits.
+        # To do this, we need to ask the model to return hidden states.
+        outputs = self.model(inputs_embeds=hidden_states, output_hidden_states=True)
+        return outputs.hidden_states[-1], None  # Return last hidden state, match Isotropic output
 
 
 class HNet(nn.Module):
@@ -70,17 +117,23 @@ class HNet(nn.Module):
 
         for _name, _layout in zip(sub_model_names, arch_layout):
             if self.is_innermost or _name in ("encoder", "decoder"):
-                SubModel = Isotropic
-                _stage_idx = stage_idx
-                _pos_idx = None
-                if _name == "encoder":
-                    _pos_idx = 0
-                elif self.is_innermost:
-                    # if innermost, then len(layer_layout) == 1
-                    _pos_idx = 0
-                elif _name == "decoder":
-                    _pos_idx = 2
-                _pos_idx_dict = {"pos_idx": _pos_idx}
+                # For the innermost stage, check if we should use GPT-NeoX
+                if self.is_innermost and config.use_gptneox_backbone:
+                    SubModel = GPTNeoXWrapper
+                    _stage_idx = stage_idx
+                    _pos_idx_dict = {"d_model": self.d_model}
+                else:
+                    SubModel = Isotropic
+                    _stage_idx = stage_idx
+                    _pos_idx = None
+                    if _name == "encoder":
+                        _pos_idx = 0
+                    elif self.is_innermost:
+                        # if innermost, then len(layer_layout) == 1
+                        _pos_idx = 0
+                    elif _name == "decoder":
+                        _pos_idx = 2
+                    _pos_idx_dict = {"pos_idx": _pos_idx}
             else:
                 SubModel = HNet
                 _stage_idx = stage_idx + 1

@@ -1,10 +1,10 @@
 {
   "model_type": "hnet",
   "stages": 1,
-  "d_model": 384,
-  "num_layers": 8,
+  "d_model": [128, 256],
+  "num_layers": [2, 4],
   "num_heads": 8,
-  "ffn_dim": 1536,
+  "ffn_dim": [512, 1024],
   "vocab_size": 256,
   "max_seq_len": 512,
   "dropout": 0.1,
@@ -13,5 +13,7 @@
     "router_hidden": 64,
     "target_reduction": 4.0
   },
-  "tie_weights": false
+  "tie_weights": false,
+  "arch_layout": ["E", ["M"], "D"],
+  "use_gptneox_backbone": true
 }
