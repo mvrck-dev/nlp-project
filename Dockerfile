@@ -2,7 +2,7 @@
 
 # Base image with CUDA, PyTorch, and Deepspeed support
 #FROM nvcr.io/nvidia/pytorch:23.10-py3
-FROM nvcr.io/nvidia/pytorch:22.04-py3
+FROM nvcr.io/nvidia/pytorch:23.10-py3
 
 # Install unzip and git (still useful for pulling repos or debugging)
 RUN apt-get update && apt-get install -y unzip git && rm -rf /var/lib/apt/lists/*

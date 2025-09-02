@@ -11,6 +11,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
+import sys
 
 import torch
 from torch.utils.data import IterableDataset
@@ -23,9 +24,11 @@ from transformers import GPTNeoXConfig, GPTNeoXForCausalLM
 try:
     from hnet.models.mixer_seq import HNetForCausalLM
     from hnet.models.config_hnet import HNetConfig
+    from hnet.models.hnet import HNet
 except Exception as e:
     HNetForCausalLM = None
     HNetConfig = None
+    HNet = None
 
 # -----------------
 # Dataset (byte-level Wiki40B streaming, same as existing project style)
@@ -91,17 +94,6 @@ class DictReturningTrainer(Trainer):
         loss = outputs["loss"] if isinstance(outputs, dict) else outputs.loss
         return (loss, outputs) if return_outputs else loss
 
-def build_gptneox_model(vocab_size: int, hidden_size=1024, num_heads=16, num_layers=24, intermediate_size=4096):
-    cfg = GPTNeoXConfig(
-        vocab_size=vocab_size,
-        hidden_size=hidden_size,
-        num_attention_heads=num_heads,
-        num_hidden_layers=num_layers,
-        intermediate_size=intermediate_size,
-        rotary_pct=1.0,
-    )
-    return GPTNeoXForCausalLM(cfg)
-
 def build_hnet_model(config_path: str):
     assert HNetForCausalLM is not None, "HNet is not available in this environment"
     with open(config_path, "r") as f:
@@ -112,7 +104,6 @@ def build_hnet_model(config_path: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model", choices=["hnet", "gptneox"], default="gptneox")
     ap.add_argument("--hnet_config", type=str, default="configs/hnet-tiny_config.json")
     ap.add_argument("--deepspeed_config", type=str, default="configs/deepseek_config.json")
     ap.add_argument("--output_dir", type=str, default="checkpoints")
@@ -123,18 +114,41 @@ def main():
     ap.add_argument("--grad_accum", type=int, default=8)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--epochs", type=int, default=1)
-    ap.add_argument("--fp16", action="store_true", default=True)
+    ap.add_argument("--fp16", action="store_true", default=True, help="Enable fp16 mixed precision")
     ap.add_argument("--logging_steps", type=int, default=200)
     ap.add_argument("--save_steps", type=int, default=1000)
     ap.add_argument("--eval_steps", type=int, default=1000)
-    ap.add_argument("--eval_bytes", type=int, default=512*500)
-    args = ap.parse_args()
+    ap.add_argument("--eval_bytes", type=int, default=512 * 500)
 
-    # --- Create separate output directories for each model ---
-    hnet_output_dir = os.path.join(args.output_dir, "hnet")
-    gptneox_output_dir = os.path.join(args.output_dir, "gptneox")
-    os.makedirs(hnet_output_dir, exist_ok=True)
-    os.makedirs(gptneox_output_dir, exist_ok=True)
+    # Accept common DeepSpeed/launcher-injected args without crashing:
+    ap.add_argument("--local_rank", type=int, default=0, help="Injected by launcher")
+    ap.add_argument("--steps", type=int, default=None, help="Optional: steps from wrapper")
+    ap.add_argument("--print_every", type=int, default=None, help="Optional: logging freq from wrapper")
+    ap.add_argument("--save_dir", type=str, default=None, help="Optional: override output dir from wrapper")
+
+    # parse_known_args prevents unexpected launcher flags from crashing the script
+    args, unknown = ap.parse_known_args()
+    if unknown:
+        print("Warning: ignoring unknown launcher args:", unknown, file=sys.stderr)
+
+    # allow wrapper-provided save_dir to override output_dir
+    if args.save_dir:
+        args.output_dir = args.save_dir
+
+    # normalize boolean
+    args.fp16 = bool(args.fp16)
+
+
+    # --- Create output directory ---
+    # Read hnet_config to decide the output directory name
+    with open(args.hnet_config, 'r') as f:
+        hnet_config_json = json.load(f)
+    
+    use_gptneox_inside_hnet = hnet_config_json.get("use_gptneox_backbone", False)
+    
+    output_dir_name = "hnet_with_gptneox" if use_gptneox_inside_hnet else "hnet"
+    output_dir = os.path.join(args.output_dir, output_dir_name)
+    os.makedirs(output_dir, exist_ok=True)
 
     # Build datasets
     train_dataset = WikiBytesDataset(seq_len=args.seq_len, max_bytes=args.max_bytes, lang=args.lang, split="train")
@@ -148,7 +162,7 @@ def main():
     hnet_model = LossComputingWrapper(hnet_model, vocab_size=vocab_size)
 
     hnet_training_args = TrainingArguments(
-        output_dir=hnet_output_dir,
+        output_dir=output_dir,
         per_device_train_batch_size=args.train_micro_batch_size,
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
@@ -172,44 +186,10 @@ def main():
         data_collator=data_collator,
     )
 
-    # --- Build GPT-NeoX model and its Trainer ---
-    print("\n--- Setting up GPT-NeoX ---")
-    gptneox_model = build_gptneox_model(vocab_size=vocab_size)
-    gptneox_model = LossComputingWrapper(gptneox_model, vocab_size=vocab_size)
-
-    gptneox_training_args = TrainingArguments(
-        output_dir=gptneox_output_dir,
-        per_device_train_batch_size=args.train_micro_batch_size,
-        gradient_accumulation_steps=args.grad_accum,
-        learning_rate=args.lr,
-        num_train_epochs=args.epochs,
-        fp16=args.fp16,
-        evaluation_strategy="steps",
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        logging_steps=args.logging_steps,
-        save_total_limit=3,
-        remove_unused_columns=False,
-        deepspeed=args.deepspeed_config,
-        report_to=[],
-    )
-
-    gptneox_trainer = DictReturningTrainer(
-        model=gptneox_model,
-        args=gptneox_training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
-        data_collator=data_collator,
-    )
-
-    # --- Train models sequentially ---
+    # --- Train model ---
     print("\n--- Starting HNet training ---")
     hnet_trainer.train()
     print("\n--- HNet training finished ---")
-
-    print("\n--- Starting GPT-NeoX training ---")
-    gptneox_trainer.train()
-    print("\n--- GPT-NeoX training finished ---")
 
 
 if __name__ == "__main__":

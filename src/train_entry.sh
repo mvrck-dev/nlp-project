@@ -25,5 +25,4 @@ echo "Detected $GPU_COUNT GPU(s) — launching with $NUM_GPUS GPU(s)."
 
 exec deepspeed --num_gpus="$NUM_GPUS" src/scripts/train_hnet-deepspeed.py \
   --hnet_config configs/hnet-tiny_config.json \
-  --steps 12000 --print_every 200 --save_dir checkpoints_tiny \
-  --use_gptneox_inside_hnet
+  --steps 12000 --print_every 200 --save_dir checkpoints_tiny
